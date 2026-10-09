@@ -4251,3 +4251,205 @@ class TestAPIRegionPriorityHierarchy:
         print(f"Result: api_host={manager5._api_host}")
         assert "ap-south-1" in manager5._api_host
 
+
+
+# =============================================================================
+# Tests for CodeWhisperer endpoint routing when profile ARN is absent
+# (Fix for "profileArn is required for this request" — AWS Builder ID)
+# =============================================================================
+
+class TestKiroAuthManagerProfilelessEndpointRouting:
+    """Tests for endpoint selection when a profile ARN is not available.
+
+    Background (root cause of 'profileArn is required for this request'):
+    runtime.{region}.kiro.dev mandates a profileArn on every request. AWS
+    Builder ID / free-tier accounts (AWS SSO OIDC) have NO profile ARN and
+    cannot obtain one — CodeWhisperer ListAvailableProfiles returns
+    AccessDeniedException ("AWS Builder ID is not supported for this operation").
+
+    Fix: when auth is AWS SSO OIDC and no profile ARN is available locally,
+    the gateway must route API/Q hosts to the CodeWhisperer / Amazon Q endpoint
+    (codewhisperer.us-east-1.amazonaws.com or q.{region}.amazonaws.com), which
+    accepts generateAssistantResponse WITHOUT a profileArn. Accounts that DO
+    have a profile ARN (enterprise/IdC) keep using runtime.{region}.kiro.dev.
+    """
+
+    def test_aws_sso_oidc_without_arn_uses_codewhisperer_endpoint_us_east_1(
+        self, tmp_path
+    ):
+        """
+        What it does: Verifies AWS SSO OIDC WITHOUT a profile ARN routes to the
+                      CodeWhisperer endpoint instead of runtime.kiro.dev.
+        Purpose: This is the missing-ARN (Builder ID) case that caused the
+                 'profileArn is required for this request' 400 error.
+
+        Uses SSO region us-west-2 so the non-us-east-1 host template
+        q.{region}.amazonaws.com applies.
+        """
+        import sqlite3
+        import json
+
+        print("Setup: Creating SQLite (AWS SSO OIDC, no profile ARN, SSO region=us-west-2)...")
+        db_file = tmp_path / "builder_id_us_west_2.sqlite3"
+        conn = sqlite3.connect(str(db_file))
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT)")
+
+        token_data = {
+            "access_token": "builder_access",
+            "refresh_token": "builder_refresh",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "region": "us-west-2",
+        }
+        cursor.execute(
+            "INSERT INTO auth_kv (key, value) VALUES (?, ?)",
+            ("kirocli:odic:token", json.dumps(token_data)),
+        )
+        # device-registration present => AWS SSO OIDC auth type
+        registration_data = {
+            "client_id": "builder_client_id",
+            "client_secret": "builder_client_secret",
+            "region": "us-west-2",
+        }
+        cursor.execute(
+            "INSERT INTO auth_kv (key, value) VALUES (?, ?)",
+            ("kirocli:odic:device-registration", json.dumps(registration_data)),
+        )
+        # state table exists but has NO api.codewhisperer.profile key (real Builder ID DB)
+        cursor.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT)")
+        conn.commit()
+        conn.close()
+
+        print("Setup: Creating KiroAuthManager...")
+        manager = KiroAuthManager(sqlite_db=str(db_file))
+
+        print("Verification: auth type is AWS SSO OIDC...")
+        assert manager.auth_type == AuthType.AWS_SSO_OIDC
+
+        print("Verification: no profile ARN available...")
+        print(f"Comparing profile_arn: Expected None, Got '{manager.profile_arn}'")
+        assert manager.profile_arn is None
+
+        print("Verification: API/Q hosts route to CodeWhisperer / Amazon Q (NOT runtime.kiro.dev)...")
+        print(f"api_host: {manager.api_host}")
+        print(f"q_host: {manager.q_host}")
+        assert manager.api_host == "https://q.us-west-2.amazonaws.com"
+        assert manager.q_host == "https://q.us-west-2.amazonaws.com"
+        assert "runtime." not in manager.api_host
+        assert "kiro.dev" not in manager.api_host
+
+    def test_aws_sso_oidc_without_arn_uses_codewhisperer_host_for_us_east_1(self, tmp_path):
+        """
+        What it does: Verifies the us-east-1 special-case host is used.
+        Purpose: us-east-1 must use codewhisperer.us-east-1.amazonaws.com
+                 (not q.us-east-1.amazonaws.com), matching kiro-cli.
+        """
+        import sqlite3
+        import json
+
+        print("Setup: Creating SQLite (AWS SSO OIDC, no profile ARN, region=us-east-1)...")
+        db_file = tmp_path / "builder_id_us_east_1.sqlite3"
+        conn = sqlite3.connect(str(db_file))
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE auth_kv (key TEXT PRIMARY KEY, value TEXT)")
+
+        token_data = {
+            "access_token": "builder_access",
+            "refresh_token": "builder_refresh",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "region": "us-east-1",
+            # Scopes mirror a real AWS Builder ID token (no profile entitlement)
+            "scopes": ["codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations"],
+        }
+        cursor.execute(
+            "INSERT INTO auth_kv (key, value) VALUES (?, ?)",
+            ("kirocli:odic:token", json.dumps(token_data)),
+        )
+        registration_data = {
+            "client_id": "builder_client_id",
+            "client_secret": "builder_client_secret",
+            "region": "us-east-1",
+        }
+        cursor.execute(
+            "INSERT INTO auth_kv (key, value) VALUES (?, ?)",
+            ("kirocli:odic:device-registration", json.dumps(registration_data)),
+        )
+        # state table exists but has NO api.codewhisperer.profile key (like real Builder ID DB)
+        cursor.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT)")
+        cursor.execute(
+            "INSERT INTO state (key, value) VALUES (?, ?)",
+            ("telemetryClientId", json.dumps("some-telemetry-id")),
+        )
+        conn.commit()
+        conn.close()
+
+        print("Setup: Creating KiroAuthManager...")
+        manager = KiroAuthManager(sqlite_db=str(db_file))
+
+        print("Verification: AWS SSO OIDC without profile ARN...")
+        assert manager.auth_type == AuthType.AWS_SSO_OIDC
+        assert manager.profile_arn is None
+
+        print("Verification: us-east-1 uses the codewhisperer.* host...")
+        print(f"api_host: {manager.api_host}")
+        assert manager.api_host == "https://codewhisperer.us-east-1.amazonaws.com"
+        assert manager.q_host == "https://codewhisperer.us-east-1.amazonaws.com"
+        assert "kiro.dev" not in manager.api_host
+
+    def test_aws_sso_oidc_with_arn_keeps_runtime_endpoint(
+        self, temp_sqlite_db_with_profile_arn
+    ):
+        """
+        What it does: Verifies AWS SSO OIDC WITH a profile ARN keeps runtime.kiro.dev.
+        Purpose: Enterprise/IdC accounts that DO have an ARN must be unaffected by
+                 the fix (successful-ARN-loading case).
+        """
+        print("Setup: Creating KiroAuthManager (AWS SSO OIDC, ARN present in state table)...")
+        manager = KiroAuthManager(sqlite_db=temp_sqlite_db_with_profile_arn)
+
+        print("Verification: auth type is AWS SSO OIDC...")
+        assert manager.auth_type == AuthType.AWS_SSO_OIDC
+
+        print("Verification: profile ARN loaded from state table...")
+        print(f"profile_arn: {manager.profile_arn}")
+        assert manager.profile_arn == "arn:aws:codewhisperer:eu-central-1:123456789012:profile/test-profile"
+
+        print("Verification: API/Q hosts keep runtime.{region}.kiro.dev...")
+        print(f"api_host: {manager.api_host}")
+        assert manager.api_host == "https://runtime.eu-central-1.kiro.dev"
+        assert manager.q_host == "https://runtime.eu-central-1.kiro.dev"
+
+    def test_kiro_desktop_without_arn_keeps_runtime_endpoint(self):
+        """
+        What it does: Verifies KIRO_DESKTOP auth (no ARN) keeps runtime.kiro.dev.
+        Purpose: The CodeWhisperer-endpoint fix must apply ONLY to AWS SSO OIDC,
+                 not to Kiro Desktop auth (which uses a different token/endpoint).
+        """
+        print("Setup: Creating KiroAuthManager (KIRO_DESKTOP, no ARN)...")
+        manager = KiroAuthManager(refresh_token="desktop_refresh", region="us-east-1")
+
+        print("Verification: auth type is KIRO_DESKTOP...")
+        assert manager.auth_type == AuthType.KIRO_DESKTOP
+        assert manager.profile_arn is None
+
+        print("Verification: hosts remain on runtime.{region}.kiro.dev...")
+        print(f"api_host: {manager.api_host}")
+        assert manager.api_host == "https://runtime.us-east-1.kiro.dev"
+        assert manager.q_host == "https://runtime.us-east-1.kiro.dev"
+
+    def test_profileless_routing_does_not_log_or_expose_tokens(
+        self, temp_sqlite_db_with_empty_state_table
+    ):
+        """
+        What it does: Sanity check that endpoint selection relies only on auth type
+                      and ARN presence (not on token contents) and does not expose tokens.
+        Purpose: Guard against accidentally leaking secrets through host selection.
+        """
+        print("Setup: Creating KiroAuthManager (AWS SSO OIDC, no profile ARN)...")
+        manager = KiroAuthManager(sqlite_db=temp_sqlite_db_with_empty_state_table)
+
+        print("Verification: hosts never contain token material...")
+        # Access token is loaded but must never appear in host URLs
+        assert manager._access_token is not None
+        assert manager._access_token not in manager.api_host
+        assert manager._access_token not in manager.q_host

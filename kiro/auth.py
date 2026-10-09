@@ -47,6 +47,7 @@ from kiro.config import (
     get_kiro_api_host,
     get_kiro_q_host,
     get_aws_sso_oidc_url,
+    get_codewhisperer_host,
 )
 from kiro.utils import get_machine_fingerprint
 
@@ -219,8 +220,33 @@ class KiroAuthManager:
         # - API/Q hosts: use determined API region (for Q Developer API calls)
         sso_region_for_oidc = self._sso_region or region
         self._refresh_url = get_kiro_refresh_url(sso_region_for_oidc)
-        self._api_host = get_kiro_api_host(final_api_region)
-        self._q_host = get_kiro_q_host(final_api_region)
+
+        # Endpoint selection (fix for "profileArn is required for this request").
+        #
+        # runtime.{region}.kiro.dev mandates a profileArn on every request. AWS
+        # Builder ID / free-tier accounts (AWS SSO OIDC) do NOT have a profile ARN
+        # and cannot obtain one — CodeWhisperer ListAvailableProfiles returns
+        # AccessDeniedException ("AWS Builder ID is not supported for this operation")
+        # and management.kiro.dev returns "User is not authorized to access this
+        # feature". For these accounts the official CodeWhisperer / Amazon Q endpoint
+        # (codewhisperer.us-east-1.amazonaws.com or q.{region}.amazonaws.com) accepts
+        # the same generateAssistantResponse request WITHOUT a profileArn.
+        #
+        # Therefore: when using AWS SSO OIDC and no profile ARN is available, route
+        # to the CodeWhisperer endpoint. All other cases keep runtime.kiro.dev.
+        use_codewhisperer = (
+            self._auth_type == AuthType.AWS_SSO_OIDC and not self._profile_arn
+        )
+        if use_codewhisperer:
+            self._api_host = get_codewhisperer_host(final_api_region)
+            self._q_host = get_codewhisperer_host(final_api_region)
+            logger.info(
+                "Using CodeWhisperer endpoint (AWS SSO OIDC without profile ARN, "
+                "e.g. AWS Builder ID): profileArn not required"
+            )
+        else:
+            self._api_host = get_kiro_api_host(final_api_region)
+            self._q_host = get_kiro_q_host(final_api_region)
         
         # Log initialized endpoints for diagnostics (helps with DNS issues like #58, #132, #133)
         logger.info(

@@ -341,6 +341,55 @@ class TestAwsSsoOidcUrlConfig:
             assert url == expected
 
 
+class TestCodeWhispererHostConfig:
+    """Tests for get_codewhisperer_host() helper (profileless Builder ID routing).
+
+    Background: AWS Builder ID accounts have no profile ARN and cannot use
+    runtime.{region}.kiro.dev (which requires one). They must use the
+    CodeWhisperer / Amazon Q endpoint, which accepts requests without a profileArn.
+    """
+
+    def test_get_codewhisperer_host_us_east_1(self):
+        """
+        What it does: Verifies us-east-1 uses the codewhisperer.* hostname.
+        Purpose: Match kiro-cli's DEFAULT_ENDPOINT for us-east-1.
+        """
+        from kiro.config import get_codewhisperer_host
+
+        url = get_codewhisperer_host("us-east-1")
+        print(f"Comparing: Expected 'https://codewhisperer.us-east-1.amazonaws.com', Got '{url}'")
+        assert url == "https://codewhisperer.us-east-1.amazonaws.com"
+
+    def test_get_codewhisperer_host_other_regions(self):
+        """
+        What it does: Verifies non-us-east-1 regions use q.{region}.amazonaws.com.
+        Purpose: Match kiro-cli's region-specific endpoint convention.
+        """
+        from kiro.config import get_codewhisperer_host
+
+        test_cases = [
+            ("eu-central-1", "https://q.eu-central-1.amazonaws.com"),
+            ("us-west-2", "https://q.us-west-2.amazonaws.com"),
+            ("ap-southeast-1", "https://q.ap-southeast-1.amazonaws.com"),
+        ]
+        for region, expected in test_cases:
+            url = get_codewhisperer_host(region)
+            print(f"Comparing: Expected '{expected}', Got '{url}'")
+            assert url == expected
+
+    def test_get_codewhisperer_host_is_not_runtime_kiro_dev(self):
+        """
+        What it does: Verifies the CodeWhisperer host is never a runtime.kiro.dev URL.
+        Purpose: Ensure profileless accounts avoid the endpoint that requires a profileArn.
+        """
+        from kiro.config import get_codewhisperer_host
+
+        for region in ("us-east-1", "eu-central-1", "us-west-2"):
+            url = get_codewhisperer_host(region)
+            assert "kiro.dev" not in url
+            assert "runtime." not in url
+
+
 class TestServerHostConfig:
     """Tests for SERVER_HOST configuration."""
     

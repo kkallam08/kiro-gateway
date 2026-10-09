@@ -184,6 +184,22 @@ KIRO_API_HOST_TEMPLATE: str = "https://runtime.{region}.kiro.dev"
 # Host for Q API (ListAvailableModels)
 KIRO_Q_HOST_TEMPLATE: str = "https://runtime.{region}.kiro.dev"
 
+# Host for AWS CodeWhisperer / Amazon Q Developer streaming API.
+#
+# Used for AWS SSO OIDC accounts that do NOT have a CodeWhisperer profile ARN
+# (notably AWS Builder ID / free-tier). The runtime.{region}.kiro.dev endpoint
+# mandates a profileArn in every request, but Builder ID accounts cannot obtain
+# one (ListAvailableProfiles returns AccessDeniedException "AWS Builder ID is not
+# supported for this operation"). The CodeWhisperer endpoint accepts the same
+# generateAssistantResponse request WITHOUT a profileArn for these accounts.
+#
+# Endpoint naming follows the official AWS SDK / kiro-cli convention:
+#   - us-east-1:  https://codewhisperer.us-east-1.amazonaws.com
+#   - all others: https://q.{region}.amazonaws.com
+# See kiro-cli: crates/chat-cli/src/api_client/endpoints.rs
+KIRO_CODEWHISPERER_US_EAST_1_HOST: str = "https://codewhisperer.us-east-1.amazonaws.com"
+KIRO_CODEWHISPERER_HOST_TEMPLATE: str = "https://q.{region}.amazonaws.com"
+
 # ==================================================================================================
 # Token Settings
 # ==================================================================================================
@@ -578,4 +594,20 @@ def get_kiro_api_host(region: str) -> str:
 def get_kiro_q_host(region: str) -> str:
     """Return Q API host for the specified region."""
     return KIRO_Q_HOST_TEMPLATE.format(region=region)
+
+
+def get_codewhisperer_host(region: str) -> str:
+    """
+    Return the AWS CodeWhisperer / Amazon Q Developer host for the specified region.
+
+    This endpoint is used for AWS SSO OIDC accounts without a profile ARN
+    (e.g. AWS Builder ID / free-tier), where runtime.{region}.kiro.dev would
+    reject the request with "profileArn is required for this request".
+
+    us-east-1 uses the legacy codewhisperer.* hostname; all other regions use
+    the q.{region}.amazonaws.com hostname, matching kiro-cli behavior.
+    """
+    if region == "us-east-1":
+        return KIRO_CODEWHISPERER_US_EAST_1_HOST
+    return KIRO_CODEWHISPERER_HOST_TEMPLATE.format(region=region)
 
